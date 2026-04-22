@@ -1,385 +1,440 @@
+import axios from "axios";
 import * as cheerio from "cheerio";
-import type { JobLead } from "@/lib/types";
+import type { JobLead, ResumeProfile, SalaryConfidence } from "@/lib/types";
 
-export type NormalizedJob = Omit<JobLead, "fitScore" | "fitReasons">;
+type RawJob = {
+  id: string;
+  source: string;
+  title: string;
+  company: string;
+  location: string;
+  url: string;
+  description: string;
+  postedAt: string;
+  salaryText?: string;
+  salaryMin?: number;
+  salaryMax?: number;
+  salaryCurrency?: string;
+};
 
-const REQUEST_TIMEOUT_MS = 12_000;
+const http = axios.create({
+  timeout: 12000,
+  headers: {
+    "User-Agent": "resume-to-jobs-ai/1.0",
+  },
+});
 
-async function fetchJson<T>(url: string): Promise<T | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+const roleVocabulary = [
+  "software engineer",
+  "backend engineer",
+  "frontend engineer",
+  "full stack engineer",
+  "platform engineer",
+  "devops",
+  "site reliability",
+  "machine learning engineer",
+  "data engineer",
+  "mobile engineer",
+];
 
-  try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "resume-to-jobs-ai/1.0"
-      },
-      next: {
-        revalidate: 600
-      }
-    });
+function slugify(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 72);
+}
 
-    if (!response.ok) {
-      return null;
-    }
-
-    return (await response.json()) as T;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
+function cleanText(text: string) {
+  if (!text) {
+    return "";
   }
+
+  const $ = cheerio.load(`<div>${text}</div>`);
+  return $.text().replace(/\s+/g, " ").trim();
 }
 
-async function fetchText(url: string): Promise<string | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "resume-to-jobs-ai/1.0"
-      },
-      next: {
-        revalidate: 600
-      }
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    return await response.text();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function compactText(value: string | null | undefined): string {
-  return (value ?? "").replace(/\s+/g, " ").trim();
-}
-
-function toJobId(source: string, seed: string): string {
-  const cleaned = seed.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 80);
-  return `${source.toLowerCase()}-${cleaned}`;
-}
-
-function parseSalaryFromText(input: string): {
-  salaryMin: number | null;
-  salaryMax: number | null;
-  salaryCurrency: string;
-} {
+function extractSalaryRange(input: string) {
   const text = input.replace(/,/g, "");
-  const pattern =
-    /(\$|USD|EUR|GBP)?\s?(\d{2,3})(?:k|000)?\s?(?:-|to|–)\s?(\$|USD|EUR|GBP)?\s?(\d{2,3})(?:k|000)?/i;
-  const match = text.match(pattern);
 
-  if (match) {
-    const minRaw = Number(match[2]);
-    const maxRaw = Number(match[4]);
+  const rangeMatch = text.match(/([$€£])\s?(\d{2,3})k?\s*(?:-|to|–)\s*([$€£])?\s?(\d{2,3})k?/i);
+  if (rangeMatch) {
+    const symbol = rangeMatch[1] || rangeMatch[3] || "$";
+    const currency = symbol === "$" ? "USD" : symbol === "€" ? "EUR" : "GBP";
 
-    const salaryMin = minRaw < 1000 ? minRaw * 1000 : minRaw;
-    const salaryMax = maxRaw < 1000 ? maxRaw * 1000 : maxRaw;
+    const lowRaw = Number(rangeMatch[2]);
+    const highRaw = Number(rangeMatch[4]);
 
-    const currencyMark = (match[1] || match[3] || "$" ).toUpperCase();
-    const salaryCurrency = currencyMark.includes("EUR")
-      ? "EUR"
-      : currencyMark.includes("GBP")
-        ? "GBP"
-        : "USD";
+    const low = lowRaw < 1000 ? lowRaw * 1000 : lowRaw;
+    const high = highRaw < 1000 ? highRaw * 1000 : highRaw;
 
-    return { salaryMin, salaryMax, salaryCurrency };
+    return { salaryMin: Math.min(low, high), salaryMax: Math.max(low, high), salaryCurrency: currency };
+  }
+
+  const singleMatch = text.match(/([$€£])\s?(\d{2,6})(?:\s*\/\s*(?:year|yr|annum))?/i);
+  if (singleMatch) {
+    const symbol = singleMatch[1] || "$";
+    const currency = symbol === "$" ? "USD" : symbol === "€" ? "EUR" : "GBP";
+    const value = Number(singleMatch[2]);
+    const normalized = value < 1000 ? value * 1000 : value;
+
+    return {
+      salaryMin: Math.round(normalized * 0.9),
+      salaryMax: Math.round(normalized * 1.1),
+      salaryCurrency: currency,
+    };
+  }
+
+  return null;
+}
+
+function estimateSalary(title: string, seniority: ResumeProfile["seniority"]) {
+  const titleText = title.toLowerCase();
+  const isFrontend = titleText.includes("frontend") || titleText.includes("front-end");
+  const isBackend = titleText.includes("backend") || titleText.includes("back-end");
+  const isFullStack = titleText.includes("full") && titleText.includes("stack");
+  const isPlatform = titleText.includes("platform") || titleText.includes("devops") || titleText.includes("sre");
+  const isData = titleText.includes("data") || titleText.includes("machine learning");
+
+  let baseMin = 110_000;
+  let baseMax = 150_000;
+
+  if (seniority === "junior") {
+    baseMin = 85_000;
+    baseMax = 120_000;
+  }
+
+  if (seniority === "senior") {
+    baseMin = 145_000;
+    baseMax = 215_000;
+  }
+
+  if (isFrontend) {
+    baseMin -= 8_000;
+    baseMax -= 6_000;
+  }
+
+  if (isBackend || isFullStack) {
+    baseMin += 4_000;
+    baseMax += 8_000;
+  }
+
+  if (isPlatform || isData) {
+    baseMin += 12_000;
+    baseMax += 18_000;
   }
 
   return {
-    salaryMin: null,
-    salaryMax: null,
-    salaryCurrency: "USD"
+    salaryMin: Math.max(baseMin, 70_000),
+    salaryMax: Math.max(baseMax, baseMin + 20_000),
+    salaryCurrency: "USD",
   };
 }
 
-function estimateSalary(title: string): { salaryMin: number; salaryMax: number } {
-  const normalized = title.toLowerCase();
+function normalizeRawJob(raw: RawJob, profile: ResumeProfile): JobLead {
+  const salaryFromText = raw.salaryText ? extractSalaryRange(raw.salaryText) : null;
+  const salaryFromDescription = extractSalaryRange(raw.description);
+  const salaryKnown = salaryFromText ?? salaryFromDescription;
 
-  if (normalized.includes("staff") || normalized.includes("principal")) {
-    return { salaryMin: 175_000, salaryMax: 240_000 };
-  }
+  const estimated = estimateSalary(raw.title, profile.seniority);
+  const salaryMin = raw.salaryMin ?? salaryKnown?.salaryMin ?? estimated.salaryMin;
+  const salaryMax = raw.salaryMax ?? salaryKnown?.salaryMax ?? estimated.salaryMax;
+  const salaryCurrency = raw.salaryCurrency ?? salaryKnown?.salaryCurrency ?? estimated.salaryCurrency;
+  const salaryConfidence: SalaryConfidence =
+    raw.salaryMin || raw.salaryMax || salaryKnown ? "listed" : "estimated";
 
-  if (normalized.includes("senior") || normalized.includes("lead")) {
-    return { salaryMin: 145_000, salaryMax: 205_000 };
-  }
-
-  if (
-    normalized.includes("full stack") ||
-    normalized.includes("backend") ||
-    normalized.includes("frontend") ||
-    normalized.includes("software engineer")
-  ) {
-    return { salaryMin: 120_000, salaryMax: 175_000 };
-  }
-
-  return { salaryMin: 105_000, salaryMax: 150_000 };
-}
-
-function enrichSalary(job: NormalizedJob): NormalizedJob {
-  if (job.salaryMin && job.salaryMax) {
-    return job;
-  }
-
-  const estimated = estimateSalary(job.title);
   return {
-    ...job,
-    salaryMin: estimated.salaryMin,
-    salaryMax: estimated.salaryMax,
-    salaryCurrency: "USD"
+    id: raw.id,
+    source: raw.source,
+    title: raw.title,
+    company: raw.company,
+    location: raw.location,
+    url: raw.url,
+    description: raw.description,
+    postedAt: raw.postedAt,
+    salaryMin,
+    salaryMax,
+    salaryCurrency,
+    salaryConfidence,
+    matchScore: 0,
+    matchReason: "",
   };
 }
 
-async function fetchRemotiveJobs(limit: number): Promise<NormalizedJob[]> {
-  const payload = await fetchJson<{
-    jobs: Array<{
-      id: number;
-      title: string;
-      company_name: string;
-      candidate_required_location: string;
-      url: string;
-      description: string;
-      salary: string;
-      publication_date: string;
-      job_type: string;
-      category: string;
-    }>;
-  }>("https://remotive.com/api/remote-jobs?category=software-dev");
+function calculateMatch(job: JobLead, profile: ResumeProfile) {
+  const titleText = `${job.title} ${job.description}`.toLowerCase();
 
-  if (!payload?.jobs) {
-    return [];
+  const roleHits = profile.targetRoles.filter((role) => titleText.includes(role.toLowerCase())).length;
+  const skillHits = profile.topSkills.filter((skill) => titleText.includes(skill.toLowerCase())).length;
+
+  let score = 28;
+  score += Math.min(roleHits * 12, 36);
+  score += Math.min(skillHits * 4, 24);
+
+  if (profile.remotePreference === "remote" && /remote|anywhere|distributed/i.test(job.location)) {
+    score += 12;
   }
 
-  return payload.jobs.slice(0, limit).map((job) => {
-    const salary = parseSalaryFromText(`${job.salary} ${job.description}`);
-    return {
-      id: `remotive-${job.id}`,
-      source: "Remotive",
-      title: compactText(job.title),
-      company: compactText(job.company_name),
-      location: compactText(job.candidate_required_location || "Remote"),
-      remote: true,
-      url: job.url,
-      description: compactText(job.description),
-      salaryMin: salary.salaryMin,
-      salaryMax: salary.salaryMax,
-      salaryCurrency: salary.salaryCurrency,
-      postedAt: job.publication_date
-    };
-  });
-}
-
-async function fetchArbeitnowJobs(limit: number): Promise<NormalizedJob[]> {
-  const payload = await fetchJson<{
-    data: Array<{
-      slug: string;
-      title: string;
-      company_name: string;
-      location: string;
-      remote: boolean;
-      url: string;
-      description: string;
-      created_at: string;
-      tags: string[];
-    }>;
-  }>("https://www.arbeitnow.com/api/job-board-api");
-
-  if (!payload?.data) {
-    return [];
+  if (profile.remotePreference === "hybrid" && /hybrid/i.test(job.location)) {
+    score += 8;
   }
 
-  return payload.data
-    .filter((job) => {
-      const title = job.title.toLowerCase();
-      return (
-        title.includes("engineer") ||
-        title.includes("developer") ||
-        title.includes("full stack")
-      );
-    })
-    .slice(0, limit)
-    .map((job) => {
-      const salary = parseSalaryFromText(job.description);
-      return {
-        id: toJobId("arbeitnow", job.slug),
-        source: "Arbeitnow",
-        title: compactText(job.title),
-        company: compactText(job.company_name),
-        location: compactText(job.location || "Remote"),
-        remote: job.remote,
-        url: job.url,
-        description: compactText(job.description),
-        salaryMin: salary.salaryMin,
-        salaryMax: salary.salaryMax,
-        salaryCurrency: salary.salaryCurrency,
-        postedAt: job.created_at
-      };
-    });
-}
-
-async function fetchTheMuseJobs(limit: number): Promise<NormalizedJob[]> {
-  const payload = await fetchJson<{
-    results: Array<{
-      id: number;
-      name: string;
-      contents: string;
-      locations: Array<{ name: string }>;
-      company: { name: string };
-      publication_date: string;
-      refs: { landing_page: string };
-    }>;
-  }>(
-    "https://www.themuse.com/api/public/jobs?page=1&descending=true&category=Software%20Engineering"
-  );
-
-  if (!payload?.results) {
-    return [];
+  if (profile.seniority === "senior" && /senior|staff|lead|principal/i.test(job.title)) {
+    score += 10;
   }
 
-  return payload.results.slice(0, limit).map((job) => {
-    const salary = parseSalaryFromText(job.contents);
-    return {
-      id: `themuse-${job.id}`,
-      source: "The Muse",
-      title: compactText(job.name),
-      company: compactText(job.company?.name),
-      location: compactText(job.locations?.[0]?.name || "Remote"),
-      remote: /remote/i.test(job.name) || /remote/i.test(job.contents),
-      url: job.refs?.landing_page,
-      description: compactText(job.contents),
-      salaryMin: salary.salaryMin,
-      salaryMax: salary.salaryMax,
-      salaryCurrency: salary.salaryCurrency,
-      postedAt: job.publication_date
-    };
-  });
-}
-
-async function fetchRemoteOkJobs(limit: number): Promise<NormalizedJob[]> {
-  const payload = await fetchJson<
-    Array<{
-      id?: number;
-      position?: string;
-      company?: string;
-      location?: string;
-      url?: string;
-      description?: string;
-      date?: string;
-      salary_min?: number;
-      salary_max?: number;
-      salary_currency?: string;
-    }>
-  >("https://remoteok.com/api");
-
-  if (!payload || payload.length < 2) {
-    return [];
+  if (profile.seniority === "mid" && /engineer ii|mid|software engineer/i.test(job.title)) {
+    score += 8;
   }
 
-  return payload
-    .slice(1)
-    .filter((job) => job.position && job.url)
-    .slice(0, limit)
-    .map((job) => ({
-      id: `remoteok-${job.id ?? toJobId("remoteok", job.url ?? "")}`,
-      source: "Remote OK",
-      title: compactText(job.position),
-      company: compactText(job.company),
-      location: compactText(job.location || "Remote"),
-      remote: true,
-      url: job.url ?? "",
-      description: compactText(job.description),
-      salaryMin: job.salary_min ?? null,
-      salaryMax: job.salary_max ?? null,
-      salaryCurrency: (job.salary_currency ?? "USD").toUpperCase(),
-      postedAt: job.date ?? null
-    }));
-}
-
-async function fetchWwrJobs(limit: number): Promise<NormalizedJob[]> {
-  const xml = await fetchText(
-    "https://weworkremotely.com/categories/remote-programming-jobs.rss"
-  );
-
-  if (!xml) {
-    return [];
+  if (job.salaryConfidence === "listed") {
+    score += 5;
   }
 
-  const $ = cheerio.load(xml, { xmlMode: true });
-  const jobs: NormalizedJob[] = [];
+  score = Math.max(1, Math.min(100, score));
 
-  $("item").each((index, item) => {
-    if (index >= limit) {
-      return;
-    }
+  const reasons: string[] = [];
+  if (roleHits > 0) {
+    reasons.push(`role overlap with ${profile.targetRoles.slice(0, 2).join("/")}`);
+  }
+  if (skillHits > 0) {
+    reasons.push(`${skillHits} matching skill${skillHits > 1 ? "s" : ""}`);
+  }
+  if (profile.remotePreference !== "no_preference" && /remote|hybrid/i.test(job.location)) {
+    reasons.push(`${profile.remotePreference} preference alignment`);
+  }
+  if (job.salaryConfidence === "listed") {
+    reasons.push("explicit salary range listed");
+  }
 
-    const title = compactText($(item).find("title").text());
-    const description = compactText($(item).find("description").text());
-    const link = compactText($(item).find("link").text());
-    const pubDate = compactText($(item).find("pubDate").text());
+  const reason = reasons.slice(0, 2).join(" + ") || "strong general fit for your engineering background";
 
-    const [company = "Unknown Company", ...titleSegments] = title.split(":");
-    const role = titleSegments.join(":").trim() || title;
-
-    const salary = parseSalaryFromText(`${title} ${description}`);
-
-    jobs.push({
-      id: toJobId("wwr", link || `${company}-${role}`),
-      source: "We Work Remotely",
-      title: role,
-      company: company.trim(),
-      location: "Remote",
-      remote: true,
-      url: link,
-      description,
-      salaryMin: salary.salaryMin,
-      salaryMax: salary.salaryMax,
-      salaryCurrency: salary.salaryCurrency,
-      postedAt: pubDate || null
-    });
-  });
-
-  return jobs;
+  return {
+    score,
+    reason,
+  };
 }
 
-function dedupeJobs(jobs: NormalizedJob[]): NormalizedJob[] {
-  const byUrl = new Map<string, NormalizedJob>();
+function dedupeJobs(jobs: JobLead[]) {
+  const map = new Map<string, JobLead>();
 
   for (const job of jobs) {
-    const key = job.url || `${job.company}-${job.title}`;
-    if (!key) {
-      continue;
-    }
-
-    if (!byUrl.has(key)) {
-      byUrl.set(key, enrichSalary(job));
+    const key = job.url ? job.url.toLowerCase() : `${job.company}-${job.title}`.toLowerCase();
+    const existing = map.get(key);
+    if (!existing || existing.matchScore < job.matchScore) {
+      map.set(key, job);
     }
   }
 
-  return Array.from(byUrl.values());
+  return Array.from(map.values());
 }
 
-export async function fetchJobLeads(maxLeads = 120): Promise<NormalizedJob[]> {
-  const sourceLimit = Math.max(20, Math.ceil(maxLeads / 4));
+function prioritizeRecent(a: JobLead, b: JobLead) {
+  if (b.matchScore !== a.matchScore) {
+    return b.matchScore - a.matchScore;
+  }
 
-  const [remotive, arbeitnow, muse, remoteOk, wwr] = await Promise.all([
-    fetchRemotiveJobs(sourceLimit),
-    fetchArbeitnowJobs(sourceLimit),
-    fetchTheMuseJobs(sourceLimit),
-    fetchRemoteOkJobs(sourceLimit),
-    fetchWwrJobs(sourceLimit)
+  return new Date(b.postedAt).getTime() - new Date(a.postedAt).getTime();
+}
+
+async function fetchRemoteOkJobs(keywords: string[]): Promise<RawJob[]> {
+  try {
+    const response = await http.get("https://remoteok.com/api", {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    const payload = Array.isArray(response.data) ? response.data : [];
+
+    return payload
+      .filter((entry) => entry && typeof entry === "object" && entry.position)
+      .map((entry) => {
+        const title = String(entry.position ?? "");
+        const description = cleanText(String(entry.description ?? ""));
+
+        return {
+          id: `remoteok-${entry.id ?? slugify(`${title}-${entry.company}`)}`,
+          source: "RemoteOK",
+          title,
+          company: String(entry.company ?? "Unknown company"),
+          location: String(entry.location ?? "Remote"),
+          url: String(entry.url ?? ""),
+          description,
+          postedAt: String(entry.date ?? new Date().toISOString()),
+          salaryMin: typeof entry.salary_min === "number" ? entry.salary_min : undefined,
+          salaryMax: typeof entry.salary_max === "number" ? entry.salary_max : undefined,
+        } satisfies RawJob;
+      })
+      .filter((job: RawJob) => {
+        if (keywords.length === 0) {
+          return true;
+        }
+
+        const haystack = `${job.title} ${job.description}`.toLowerCase();
+        return keywords.some((term) => haystack.includes(term.toLowerCase()));
+      });
+  } catch {
+    return [];
+  }
+}
+
+async function fetchRemotiveJobs(keywords: string[]): Promise<RawJob[]> {
+  try {
+    const search = encodeURIComponent(keywords.slice(0, 3).join(" "));
+    const response = await http.get(`https://remotive.com/api/remote-jobs?search=${search}`);
+
+    const jobs = Array.isArray(response.data?.jobs) ? response.data.jobs : [];
+
+    return jobs.map((entry: Record<string, unknown>) => {
+      const title = String(entry.title ?? "");
+      const description = cleanText(String(entry.description ?? ""));
+
+      return {
+        id: `remotive-${entry.id ?? slugify(`${title}-${entry.company_name}`)}`,
+        source: "Remotive",
+        title,
+        company: String(entry.company_name ?? "Unknown company"),
+        location: String(entry.candidate_required_location ?? "Remote"),
+        url: String(entry.url ?? ""),
+        description,
+        postedAt: String(entry.publication_date ?? new Date().toISOString()),
+        salaryText: String(entry.salary ?? ""),
+      } satisfies RawJob;
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function fetchArbeitnowJobs(keywords: string[]): Promise<RawJob[]> {
+  try {
+    const response = await http.get("https://www.arbeitnow.com/api/job-board-api");
+    const jobs = Array.isArray(response.data?.data) ? response.data.data : [];
+
+    return jobs
+      .map((entry: Record<string, unknown>) => {
+        const title = String(entry.title ?? "");
+        const description = cleanText(String(entry.description ?? ""));
+        const location = String(entry.location ?? "Remote");
+
+        const sourceUrl =
+          typeof entry.url === "string" && entry.url.length > 0
+            ? entry.url
+            : `https://www.arbeitnow.com/jobs/${entry.slug ?? slugify(title)}`;
+
+        return {
+          id: `arbeitnow-${entry.slug ?? slugify(`${title}-${entry.company_name}`)}`,
+          source: "Arbeitnow",
+          title,
+          company: String(entry.company_name ?? "Unknown company"),
+          location,
+          url: sourceUrl,
+          description,
+          postedAt: new Date().toISOString(),
+        } satisfies RawJob;
+      })
+      .filter((job: RawJob) => {
+        if (keywords.length === 0) {
+          return true;
+        }
+
+        const haystack = `${job.title} ${job.description}`.toLowerCase();
+        return keywords.some((term) => haystack.includes(term.toLowerCase()));
+      });
+  } catch {
+    return [];
+  }
+}
+
+async function fetchMuseJobs(keywords: string[]): Promise<RawJob[]> {
+  try {
+    const query = encodeURIComponent(keywords.slice(0, 2).join(" ") || "software engineer");
+    const response = await http.get(`https://www.themuse.com/api/public/jobs?category=${query}&page=1`);
+
+    const results = Array.isArray(response.data?.results) ? response.data.results : [];
+
+    return results.map((entry: Record<string, unknown>) => {
+      const title = String(entry.name ?? "");
+      const company =
+        typeof entry.company === "object" && entry.company && "name" in entry.company
+          ? String((entry.company as { name?: string }).name ?? "Unknown company")
+          : "Unknown company";
+
+      const locations =
+        Array.isArray(entry.locations) && entry.locations.length > 0
+          ? entry.locations
+              .map((location) => {
+                if (typeof location === "object" && location && "name" in location) {
+                  return String((location as { name?: string }).name ?? "");
+                }
+                return "";
+              })
+              .filter(Boolean)
+              .join(", ")
+          : "Remote";
+
+      const landingPage =
+        typeof entry.refs === "object" && entry.refs && "landing_page" in entry.refs
+          ? String((entry.refs as { landing_page?: string }).landing_page ?? "")
+          : "";
+
+      return {
+        id: `muse-${entry.id ?? slugify(`${title}-${company}`)}`,
+        source: "The Muse",
+        title,
+        company,
+        location: locations,
+        url: landingPage,
+        description: cleanText(String(entry.contents ?? "")),
+        postedAt: String(entry.publication_date ?? new Date().toISOString()),
+      } satisfies RawJob;
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function buildSearchKeywords(profile: ResumeProfile) {
+  const rawTerms = [...profile.targetRoles, ...profile.topSkills, ...roleVocabulary]
+    .map((term) => term.trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(rawTerms)).slice(0, 20);
+}
+
+export async function findRankedJobs(profile: ResumeProfile, limit = 20): Promise<JobLead[]> {
+  const keywords = buildSearchKeywords(profile);
+
+  const [remoteOk, remotive, arbeitnow, muse] = await Promise.all([
+    fetchRemoteOkJobs(keywords),
+    fetchRemotiveJobs(keywords),
+    fetchArbeitnowJobs(keywords),
+    fetchMuseJobs(keywords),
   ]);
 
-  return dedupeJobs([...remotive, ...arbeitnow, ...muse, ...remoteOk, ...wwr]).slice(
-    0,
-    maxLeads
-  );
+  const combined = [...remoteOk, ...remotive, ...arbeitnow, ...muse]
+    .filter((job) => job.title && job.company && job.url)
+    .map((job) => normalizeRawJob(job, profile))
+    .map((job) => {
+      const { score, reason } = calculateMatch(job, profile);
+      return {
+        ...job,
+        matchScore: score,
+        matchReason: reason,
+      };
+    });
+
+  const deduped = dedupeJobs(combined)
+    .filter((job) => {
+      const text = `${job.title} ${job.description}`.toLowerCase();
+      return roleVocabulary.some((term) => text.includes(term));
+    })
+    .sort(prioritizeRecent);
+
+  if (deduped.length >= limit) {
+    return deduped.slice(0, limit);
+  }
+
+  return deduped;
 }

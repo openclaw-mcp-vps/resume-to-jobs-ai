@@ -1,56 +1,39 @@
 import { NextResponse } from "next/server";
-import { saveAccessToken } from "@/lib/database";
+import { upsertPurchaseRecord } from "@/lib/database";
 import {
-  extractAccessToken,
-  parseLemonWebhookPayload,
-  verifyLemonWebhookSignature
+  extractPaidEmailFromStripeEvent,
+  verifyStripeWebhookSignature,
 } from "@/lib/lemonsqueezy";
 
-export const runtime = "nodejs";
-
-const PAID_EVENTS = new Set([
-  "order_created",
-  "subscription_created",
-  "subscription_payment_success",
-  "subscription_resumed"
-]);
-
 export async function POST(request: Request) {
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    return NextResponse.json({ error: "Missing STRIPE_WEBHOOK_SECRET" }, { status: 500 });
+  }
+
+  const signature = request.headers.get("stripe-signature");
+  if (!signature) {
+    return NextResponse.json({ error: "Missing signature" }, { status: 400 });
+  }
+
   const rawBody = await request.text();
-  const signature = request.headers.get("x-signature");
 
-  const isValid = verifyLemonWebhookSignature({
-    body: rawBody,
-    signature,
-    secret: process.env.LEMON_SQUEEZY_WEBHOOK_SECRET
-  });
-
-  if (!isValid) {
-    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+  const valid = verifyStripeWebhookSignature(rawBody, signature, webhookSecret);
+  if (!valid) {
+    return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
   }
 
-  const payload = parseLemonWebhookPayload(rawBody);
-  if (!payload) {
-    return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
+  let event: unknown;
+  try {
+    event = JSON.parse(rawBody);
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const eventName = payload.meta?.event_name ?? "unknown";
-  const accessToken = extractAccessToken(payload);
-
-  if (accessToken) {
-    const email = payload.data?.attributes?.user_email ?? "customer@lemonsqueezy";
-    const orderId = payload.data?.id ?? `unknown-${Date.now()}`;
-
-    await saveAccessToken({
-      token: accessToken,
-      email,
-      orderId,
-      status: PAID_EVENTS.has(eventName) ? "paid" : "pending"
-    });
+  const purchase = extractPaidEmailFromStripeEvent(event);
+  if (purchase) {
+    await upsertPurchaseRecord(purchase);
   }
 
-  return NextResponse.json({
-    received: true,
-    event: eventName
-  });
+  return NextResponse.json({ received: true });
 }

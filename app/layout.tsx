@@ -1,57 +1,56 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Space_Grotesk, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
+const headingFont = Space_Grotesk({
+  variable: "--font-heading",
   subsets: ["latin"],
-  variable: "--font-geist-sans"
+  weight: ["500", "700"],
 });
 
-const geistMono = Geist_Mono({
+const bodyFont = IBM_Plex_Sans({
+  variable: "--font-body",
   subsets: ["latin"],
-  variable: "--font-geist-mono"
+  weight: ["400", "500", "600"],
 });
-
-const siteName = "Resume-to-Jobs AI";
-const siteDescription =
-  "Paste your resume and get 20 ranked software engineering jobs with salary estimates and personalized pitch emails.";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://resume-to-jobs-ai.com"),
-  title: {
-    default: siteName,
-    template: `%s | ${siteName}`
-  },
-  description: siteDescription,
+  metadataBase: new URL("https://resume-to-jobs-ai.example.com"),
+  title: "Resume-to-Jobs AI | 20 Ranked Job Matches + Pitch Emails",
+  description:
+    "Paste your resume and get 20 ranked software engineering job matches with salary estimates and AI-generated pitch emails.",
   openGraph: {
-    title: siteName,
-    description: siteDescription,
+    title: "Resume-to-Jobs AI",
+    description:
+      "Paste your resume and get 20 ranked software engineering jobs with salary context and personalized outreach emails.",
     type: "website",
-    url: "https://resume-to-jobs-ai.com",
-    siteName
+    url: "/",
+    images: [
+      {
+        url: "/og-image.svg",
+        width: 1200,
+        height: 630,
+        alt: "Resume-to-Jobs AI",
+      },
+    ],
   },
   twitter: {
     card: "summary_large_image",
-    title: siteName,
-    description: siteDescription
+    title: "Resume-to-Jobs AI",
+    description:
+      "Get 20 ranked job leads and personalized pitch emails from one resume paste.",
+    images: ["/og-image.svg"],
   },
-  alternates: {
-    canonical: "/"
-  },
-  robots: {
-    index: true,
-    follow: true
-  }
 };
 
 export default function RootLayout({
-  children
+  children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+    <html lang="en" className="dark">
+      <body className={`${headingFont.variable} ${bodyFont.variable} bg-[#0d1117] text-[#f0f6fc] antialiased`}>
         {children}
       </body>
     </html>

@@ -1,224 +1,119 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
-import type {
-  AccessTokenRecord,
-  PitchEmailModel,
-  SearchResultRecord
-} from "@/lib/types";
 
-const DATA_DIR = path.join(process.cwd(), ".data");
-const ACCESS_FILE = path.join(DATA_DIR, "access-tokens.json");
-const SEARCH_RESULTS_FILE = path.join(DATA_DIR, "search-results.json");
+export type PurchaseRecord = {
+  email: string;
+  sessionId?: string;
+  customerId?: string;
+  purchasedAt: string;
+  lastPaidAt: string;
+  accessExpiresAt: string;
+};
 
-const pool = process.env.DATABASE_URL
-  ? new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl:
-        process.env.NODE_ENV === "production"
-          ? { rejectUnauthorized: false }
-          : false
-    })
-  : null;
+type PurchaseRecordInput = {
+  email: string;
+  sessionId?: string;
+  customerId?: string;
+  purchasedAt?: string;
+};
 
-let schemaReady = false;
+const DATABASE_FILE_PATH = path.join(process.cwd(), "data", "purchases.json");
 
-async function ensureSchema() {
-  if (!pool || schemaReady) {
-    return;
-  }
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS access_tokens (
-      token TEXT PRIMARY KEY,
-      email TEXT NOT NULL,
-      order_id TEXT NOT NULL,
-      status TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS search_results (
-      id TEXT PRIMARY KEY,
-      data JSONB NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-
-  schemaReady = true;
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
 }
 
-async function ensureDataDir() {
-  await mkdir(DATA_DIR, { recursive: true });
-}
+async function ensureDatabaseFile() {
+  await mkdir(path.dirname(DATABASE_FILE_PATH), { recursive: true });
 
-async function readJson<T>(filePath: string, fallback: T): Promise<T> {
   try {
-    const raw = await readFile(filePath, "utf8");
-    return JSON.parse(raw) as T;
+    await readFile(DATABASE_FILE_PATH, "utf8");
   } catch {
-    return fallback;
+    await writeFile(DATABASE_FILE_PATH, "[]", "utf8");
   }
 }
 
-async function writeJson(filePath: string, value: unknown) {
-  await ensureDataDir();
-  await writeFile(filePath, JSON.stringify(value, null, 2), "utf8");
-}
+async function readDatabase(): Promise<PurchaseRecord[]> {
+  await ensureDatabaseFile();
 
-export async function saveAccessToken(
-  input: Omit<AccessTokenRecord, "createdAt"> & { createdAt?: string }
-): Promise<void> {
-  const record: AccessTokenRecord = {
-    ...input,
-    createdAt: input.createdAt ?? new Date().toISOString()
-  };
+  const raw = await readFile(DATABASE_FILE_PATH, "utf8");
 
-  if (pool) {
-    await ensureSchema();
-    await pool.query(
-      `
-      INSERT INTO access_tokens (token, email, order_id, status, created_at)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (token)
-      DO UPDATE SET
-        email = EXCLUDED.email,
-        order_id = EXCLUDED.order_id,
-        status = EXCLUDED.status
-    `,
-      [record.token, record.email, record.orderId, record.status, record.createdAt]
-    );
-    return;
-  }
-
-  const entries = await readJson<AccessTokenRecord[]>(ACCESS_FILE, []);
-  const existingIndex = entries.findIndex((entry) => entry.token === record.token);
-
-  if (existingIndex >= 0) {
-    entries[existingIndex] = record;
-  } else {
-    entries.push(record);
-  }
-
-  await writeJson(ACCESS_FILE, entries);
-}
-
-export async function getAccessToken(token: string): Promise<AccessTokenRecord | null> {
-  if (!token) {
-    return null;
-  }
-
-  if (pool) {
-    await ensureSchema();
-    const result = await pool.query<{
-      token: string;
-      email: string;
-      order_id: string;
-      status: string;
-      created_at: Date;
-    }>(
-      `SELECT token, email, order_id, status, created_at FROM access_tokens WHERE token = $1 LIMIT 1`,
-      [token]
-    );
-
-    const row = result.rows[0];
-    if (!row) {
-      return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
     }
 
-    return {
-      token: row.token,
-      email: row.email,
-      orderId: row.order_id,
-      status: row.status === "paid" ? "paid" : "pending",
-      createdAt: row.created_at.toISOString()
-    };
+    return parsed
+      .filter((entry) => typeof entry?.email === "string")
+      .map((entry) => ({
+        email: normalizeEmail(String(entry.email)),
+        sessionId: entry.sessionId ? String(entry.sessionId) : undefined,
+        customerId: entry.customerId ? String(entry.customerId) : undefined,
+        purchasedAt: String(entry.purchasedAt ?? new Date().toISOString()),
+        lastPaidAt: String(entry.lastPaidAt ?? entry.purchasedAt ?? new Date().toISOString()),
+        accessExpiresAt: String(entry.accessExpiresAt ?? new Date(Date.now() + 31 * 24 * 60 * 60 * 1000).toISOString()),
+      }));
+  } catch {
+    return [];
   }
-
-  const entries = await readJson<AccessTokenRecord[]>(ACCESS_FILE, []);
-  return entries.find((entry) => entry.token === token) ?? null;
 }
 
-export async function isAccessTokenPaid(token: string): Promise<boolean> {
-  const record = await getAccessToken(token);
-  return Boolean(record && record.status === "paid");
+async function writeDatabase(records: PurchaseRecord[]) {
+  await ensureDatabaseFile();
+
+  const tmpPath = `${DATABASE_FILE_PATH}.tmp`;
+  const payload = JSON.stringify(records, null, 2);
+  await writeFile(tmpPath, payload, "utf8");
+  await rename(tmpPath, DATABASE_FILE_PATH);
 }
 
-export async function createSearchResult(
-  input: Omit<SearchResultRecord, "id" | "createdAt" | "pitches">
-): Promise<SearchResultRecord> {
-  const record: SearchResultRecord = {
-    id: randomUUID(),
-    createdAt: new Date().toISOString(),
-    pitches: [],
-    ...input
-  };
-
-  await saveSearchResult(record);
-  return record;
+function computeAccessExpiry(baseIso?: string) {
+  const baseDate = baseIso ? new Date(baseIso) : new Date();
+  const expiry = new Date(baseDate.getTime() + 31 * 24 * 60 * 60 * 1000);
+  return expiry.toISOString();
 }
 
-export async function saveSearchResult(record: SearchResultRecord): Promise<void> {
-  if (pool) {
-    await ensureSchema();
-    await pool.query(
-      `
-      INSERT INTO search_results (id, data, created_at)
-      VALUES ($1, $2::jsonb, $3)
-      ON CONFLICT (id)
-      DO UPDATE SET data = EXCLUDED.data
-    `,
-      [record.id, JSON.stringify(record), record.createdAt]
-    );
-    return;
-  }
+export async function upsertPurchaseRecord(input: PurchaseRecordInput) {
+  const email = normalizeEmail(input.email);
+  const purchasedAt = input.purchasedAt ?? new Date().toISOString();
 
-  const records = await readJson<SearchResultRecord[]>(SEARCH_RESULTS_FILE, []);
-  const index = records.findIndex((entry) => entry.id === record.id);
-  if (index >= 0) {
-    records[index] = record;
+  const records = await readDatabase();
+  const existing = records.find((record) => record.email === email);
+
+  if (existing) {
+    existing.sessionId = input.sessionId ?? existing.sessionId;
+    existing.customerId = input.customerId ?? existing.customerId;
+    existing.lastPaidAt = purchasedAt;
+    existing.accessExpiresAt = computeAccessExpiry(purchasedAt);
   } else {
-    records.push(record);
+    records.push({
+      email,
+      sessionId: input.sessionId,
+      customerId: input.customerId,
+      purchasedAt,
+      lastPaidAt: purchasedAt,
+      accessExpiresAt: computeAccessExpiry(purchasedAt),
+    });
   }
-  await writeJson(SEARCH_RESULTS_FILE, records);
+
+  await writeDatabase(records);
 }
 
-export async function getSearchResult(
-  id: string
-): Promise<SearchResultRecord | null> {
-  if (!id) {
-    return null;
+export async function hasActivePurchase(email: string) {
+  const normalizedEmail = normalizeEmail(email);
+  const records = await readDatabase();
+
+  const record = records.find((entry) => entry.email === normalizedEmail);
+  if (!record) {
+    return false;
   }
 
-  if (pool) {
-    await ensureSchema();
-    const result = await pool.query<{ data: SearchResultRecord }>(
-      `SELECT data FROM search_results WHERE id = $1 LIMIT 1`,
-      [id]
-    );
-    return result.rows[0]?.data ?? null;
-  }
-
-  const records = await readJson<SearchResultRecord[]>(SEARCH_RESULTS_FILE, []);
-  return records.find((entry) => entry.id === id) ?? null;
+  return new Date(record.accessExpiresAt).getTime() > Date.now();
 }
 
-export async function updateSearchResultPitches(
-  id: string,
-  pitches: PitchEmailModel[]
-): Promise<SearchResultRecord | null> {
-  const existing = await getSearchResult(id);
-  if (!existing) {
-    return null;
-  }
-
-  const updated: SearchResultRecord = {
-    ...existing,
-    pitches
-  };
-
-  await saveSearchResult(updated);
-  return updated;
+export async function getPurchaseRecord(email: string) {
+  const normalizedEmail = normalizeEmail(email);
+  const records = await readDatabase();
+  return records.find((entry) => entry.email === normalizedEmail) ?? null;
 }

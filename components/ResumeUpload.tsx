@@ -1,261 +1,279 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
-import { Loader2, FileUp, ArrowRight } from "lucide-react";
 import { z } from "zod";
+import { AlertCircle, CheckCircle2, Lock, UploadCloud, WandSparkles } from "lucide-react";
+import type { JobLead, PitchEmailDraft, ResumeProfile } from "@/lib/types";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle
-} from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import type { ParsedResume } from "@/lib/types";
+import { Textarea } from "@/components/ui/textarea";
+import { JobResults } from "@/components/JobResults";
 
-const formSchema = z.object({
+const resumeSchema = z.object({
   resumeText: z
     .string()
-    .min(180, "Paste at least 180 characters so we can extract useful signals.")
+    .min(300, "Paste at least 300 characters from your resume for accurate matching.")
+    .max(50_000, "Resume text is too long. Keep it below 50,000 characters."),
 });
 
-type FormValues = z.infer<typeof formSchema>;
+type ResumeFormValues = z.infer<typeof resumeSchema>;
 
-type FlowStage =
-  | "idle"
-  | "parsing"
-  | "searching"
-  | "writing"
-  | "complete";
+type ResumeUploadProps = {
+  initialAccess: boolean;
+};
 
-export function ResumeUpload() {
-  const router = useRouter();
-  const [stage, setStage] = useState<FlowStage>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [parsed, setParsed] = useState<ParsedResume | null>(null);
-  const [fileName, setFileName] = useState<string | null>(null);
+export function ResumeUpload({ initialAccess }: ResumeUploadProps) {
+  const [hasAccess, setHasAccess] = useState(initialAccess);
+  const [unlockEmail, setUnlockEmail] = useState("");
+  const [unlockError, setUnlockError] = useState("");
+  const [unlockSuccess, setUnlockSuccess] = useState("");
 
-  const form = useForm<FormValues>({
-    resolver: zodResolver(formSchema),
+  const [isRunning, setIsRunning] = useState(false);
+  const [loadingPitches, setLoadingPitches] = useState(false);
+  const [apiError, setApiError] = useState("");
+  const [statusText, setStatusText] = useState("");
+
+  const [profile, setProfile] = useState<ResumeProfile | null>(null);
+  const [jobs, setJobs] = useState<JobLead[]>([]);
+  const [pitches, setPitches] = useState<PitchEmailDraft[]>([]);
+
+  const paymentLink = process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK;
+
+  const form = useForm<ResumeFormValues>({
+    resolver: zodResolver(resumeSchema),
     defaultValues: {
-      resumeText: ""
-    }
+      resumeText: "",
+    },
   });
 
-  const stageLabel = useMemo(() => {
-    if (stage === "parsing") return "Parsing your resume";
-    if (stage === "searching") return "Searching and ranking job leads";
-    if (stage === "writing") return "Generating personalized pitch emails";
-    if (stage === "complete") return "Done";
-    return "";
-  }, [stage]);
-
-  async function handlePdfUpload(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
-
-    setFileName(file.name);
-    setErrorMessage(null);
+  async function handleUnlock() {
+    setUnlockError("");
+    setUnlockSuccess("");
 
     try {
-      const bytes = await file.arrayBuffer();
-      const uint8 = new Uint8Array(bytes);
-      let binary = "";
-      for (const byte of uint8) {
-        binary += String.fromCharCode(byte);
-      }
-      const base64 = btoa(binary);
-
-      setStage("parsing");
-      const response = await fetch("/api/parse-resume", {
+      const response = await fetch("/api/unlock", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          pdfBase64: base64
-        })
+        body: JSON.stringify({ email: unlockEmail }),
       });
 
+      const data = (await response.json()) as { ok?: boolean; error?: string };
+
       if (!response.ok) {
-        throw new Error("Could not parse this PDF. Try pasting plain text instead.");
+        setUnlockError(data.error ?? "Unable to unlock access.");
+        return;
       }
 
-      const payload = (await response.json()) as {
-        resumeText: string;
-        parsedResume: ParsedResume;
-      };
-
-      form.setValue("resumeText", payload.resumeText);
-      setParsed(payload.parsedResume);
-      setStage("idle");
-    } catch (error) {
-      setStage("idle");
-      setErrorMessage(
-        error instanceof Error ? error.message : "PDF upload failed."
-      );
+      setHasAccess(true);
+      setUnlockSuccess("Access unlocked. You can now run your resume through the matcher.");
+    } catch {
+      setUnlockError("Network error while checking your purchase.");
     }
   }
 
-  async function onSubmit(values: FormValues) {
-    setErrorMessage(null);
+  async function handleResumeFileUpload(file: File) {
+    const text = await file.text();
+    form.setValue("resumeText", text, { shouldValidate: true });
+  }
+
+  async function onSubmit(values: ResumeFormValues) {
+    setApiError("");
+    setStatusText("Analyzing your resume for role, skills, and seniority...");
+    setIsRunning(true);
+    setJobs([]);
+    setPitches([]);
 
     try {
-      setStage("parsing");
-      const parseResponse = await fetch("/api/parse-resume", {
+      const analyzeResponse = await fetch("/api/analyze-resume", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
         },
-        body: JSON.stringify({ resumeText: values.resumeText })
+        body: JSON.stringify({ resumeText: values.resumeText }),
       });
 
-      if (!parseResponse.ok) {
-        throw new Error("Resume parsing failed. Please review your resume text.");
+      const analyzedData = (await analyzeResponse.json()) as { profile?: ResumeProfile; error?: string };
+
+      if (!analyzeResponse.ok || !analyzedData.profile) {
+        throw new Error(analyzedData.error ?? "Failed to analyze resume.");
       }
 
-      const parsePayload = (await parseResponse.json()) as {
-        resumeText: string;
-        parsedResume: ParsedResume;
-      };
+      setProfile(analyzedData.profile);
 
-      setParsed(parsePayload.parsedResume);
-
-      setStage("searching");
+      setStatusText("Searching multi-board job feeds and ranking best-fit roles...");
       const searchResponse = await fetch("/api/search-jobs", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          resumeText: parsePayload.resumeText,
-          parsedResume: parsePayload.parsedResume
-        })
+        body: JSON.stringify({ profile: analyzedData.profile }),
       });
 
-      if (!searchResponse.ok) {
-        throw new Error("Job search failed. Please retry in a minute.");
+      const searchData = (await searchResponse.json()) as { jobs?: JobLead[]; error?: string };
+
+      if (!searchResponse.ok || !searchData.jobs) {
+        throw new Error(searchData.error ?? "Failed to search jobs.");
       }
 
-      const searchPayload = (await searchResponse.json()) as {
-        resultId: string;
-        jobsCount: number;
-      };
+      setJobs(searchData.jobs);
 
-      setStage("writing");
+      setStatusText("Generating personalized outreach pitches for each matched role...");
+      setLoadingPitches(true);
       const pitchResponse = await fetch("/api/generate-pitches", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          resultId: searchPayload.resultId
-        })
+        body: JSON.stringify({ profile: analyzedData.profile, jobs: searchData.jobs }),
       });
 
-      if (!pitchResponse.ok) {
-        throw new Error("Pitch email generation failed. Please retry.");
+      const pitchData = (await pitchResponse.json()) as { pitches?: PitchEmailDraft[]; error?: string };
+
+      if (!pitchResponse.ok || !pitchData.pitches) {
+        throw new Error(pitchData.error ?? "Failed to generate pitches.");
       }
 
-      setStage("complete");
-      router.push(`/results/${searchPayload.resultId}`);
+      setPitches(pitchData.pitches);
+      setStatusText("Done. Review your ranked leads and copy-ready pitch emails below.");
     } catch (error) {
-      setStage("idle");
-      setErrorMessage(error instanceof Error ? error.message : "Unexpected error");
+      const message = error instanceof Error ? error.message : "Unexpected error while running the matcher.";
+      setApiError(message);
+      setStatusText("");
+
+      if (message.toLowerCase().includes("purchase required")) {
+        setHasAccess(false);
+      }
+    } finally {
+      setIsRunning(false);
+      setLoadingPitches(false);
     }
+  }
+
+  if (!hasAccess) {
+    return (
+      <Card className="border-[#3b4552] bg-[#0d1117]/95">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-2xl text-[#f0f6fc]">
+            <Lock className="h-6 w-6 text-[#2f81f7]" />
+            Tool access is paid
+          </CardTitle>
+          <CardDescription>
+            Pay via Stripe checkout, then unlock with the same purchase email. Access stays active for your billing period.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <a
+              href={process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK as string}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-11 items-center justify-center rounded-md border border-[#2f81f7] bg-[#2f81f7] px-4 text-sm font-semibold text-white transition hover:bg-[#3f8cff]"
+            >
+              Buy Access - $19/month
+            </a>
+            <Input
+              type="email"
+              placeholder="Purchase email"
+              value={unlockEmail}
+              onChange={(event) => setUnlockEmail(event.target.value)}
+            />
+          </div>
+
+          <Button type="button" variant="secondary" onClick={handleUnlock} className="h-11 w-full sm:w-auto">
+            Unlock with purchase email
+          </Button>
+
+          {!paymentLink ? (
+            <p className="text-sm text-[#ffb4b4]">Set NEXT_PUBLIC_STRIPE_PAYMENT_LINK to enable checkout.</p>
+          ) : null}
+
+          {unlockError ? (
+            <p className="inline-flex items-center gap-2 text-sm text-[#ff9b9b]">
+              <AlertCircle className="h-4 w-4" />
+              {unlockError}
+            </p>
+          ) : null}
+
+          {unlockSuccess ? (
+            <p className="inline-flex items-center gap-2 text-sm text-[#8de3be]">
+              <CheckCircle2 className="h-4 w-4" />
+              {unlockSuccess}
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
+    );
   }
 
   return (
     <div className="space-y-6">
-      <Card>
+      <Card className="border-[#3b4552] bg-[#0d1117]/95">
         <CardHeader>
-          <CardTitle>Paste your resume</CardTitle>
+          <CardTitle className="text-2xl text-[#f0f6fc]">Run Your Resume Match</CardTitle>
           <CardDescription>
-            We extract skill signals, experience, and role preferences to rank jobs by fit.
+            Paste your resume text, then get ranked job leads and personalized pitch emails in under a minute.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-            <Textarea
-              placeholder="Paste your full resume text here..."
-              className="min-h-56"
-              {...form.register("resumeText")}
-            />
-            {form.formState.errors.resumeText ? (
-              <p className="text-sm text-rose-300">
-                {form.formState.errors.resumeText.message}
-              </p>
-            ) : null}
+          <form className="space-y-4" onSubmit={form.handleSubmit(onSubmit)}>
+            <div className="space-y-2">
+              <label htmlFor="resumeText" className="text-sm font-medium text-[#c9d1d9]">
+                Resume text
+              </label>
+              <Textarea
+                id="resumeText"
+                placeholder="Paste your resume content including summary, experience bullets, technologies, and impact metrics."
+                {...form.register("resumeText")}
+              />
+              {form.formState.errors.resumeText ? (
+                <p className="text-sm text-[#ff9b9b]">{form.formState.errors.resumeText.message}</p>
+              ) : null}
+            </div>
 
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-300 hover:text-slate-200">
-                <FileUp className="h-4 w-4" />
-                <span>{fileName ? `Loaded: ${fileName}` : "Or upload PDF"}</span>
-                <Input
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-[#30363d] bg-[#161b22] px-3 py-2 text-sm text-[#d0d7de] transition hover:bg-[#1f2733]">
+                <UploadCloud className="h-4 w-4" />
+                Upload text file
+                <input
                   type="file"
-                  accept="application/pdf"
-                  onChange={handlePdfUpload}
+                  accept=".txt,.md,.rtf,text/plain,text/markdown"
                   className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) {
+                      void handleResumeFileUpload(file);
+                    }
+                  }}
                 />
               </label>
-              <Button type="submit" size="lg" disabled={stage !== "idle"}>
-                {stage !== "idle" ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    {stageLabel}
-                  </>
-                ) : (
-                  <>
-                    Find 20 jobs and write pitches
-                    <ArrowRight className="ml-2 h-4 w-4" />
-                  </>
-                )}
+
+              <Button type="submit" className="h-11" disabled={isRunning}>
+                <WandSparkles className="mr-2 h-4 w-4" />
+                {isRunning ? "Running pipeline..." : "Analyze resume + find jobs"}
               </Button>
             </div>
           </form>
+
+          {statusText ? <p className="mt-4 text-sm text-[#9cc2ff]">{statusText}</p> : null}
+          {apiError ? <p className="mt-3 text-sm text-[#ff9b9b]">{apiError}</p> : null}
+          {profile ? (
+            <div className="mt-4 rounded-md border border-[#30363d] bg-[#0b1118] p-3 text-sm text-[#b9c4cf]">
+              <p>
+                <span className="font-semibold text-[#d0d7de]">Detected profile:</span> {profile.seniority} {" | "}
+                {profile.yearsExperience}+ years {" | "}
+                {profile.topSkills.slice(0, 6).join(", ")}
+              </p>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 
-      {parsed ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Extracted candidate profile</CardTitle>
-            <CardDescription>{parsed.summary}</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="success">{parsed.yearsExperience}+ years</Badge>
-              <Badge variant="muted">{parsed.seniority} level</Badge>
-              {parsed.desiredTitles.map((title) => (
-                <Badge key={title} variant="default">
-                  {title}
-                </Badge>
-              ))}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {parsed.skills.slice(0, 12).map((skill) => (
-                <Badge key={skill} variant="muted">
-                  {skill}
-                </Badge>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      ) : null}
-
-      {errorMessage ? (
-        <Card className="border-rose-800 bg-rose-950/20">
-          <CardContent className="p-4 text-sm text-rose-200">{errorMessage}</CardContent>
-        </Card>
-      ) : null}
+      <JobResults jobs={jobs} pitches={pitches} loadingPitches={loadingPitches} />
     </div>
   );
 }

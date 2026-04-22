@@ -1,53 +1,57 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { generatePitches } from "@/lib/ai";
-import {
-  getSearchResult,
-  isAccessTokenPaid,
-  updateSearchResultPitches
-} from "@/lib/database";
+import { getAuthorizedEmailFromRequest } from "@/lib/access";
+import { generatePitchEmailsWithAI } from "@/lib/openai";
 
-export const runtime = "nodejs";
-
-const bodySchema = z.object({
-  resultId: z.string().min(10)
+const payloadSchema = z.object({
+  profile: z.object({
+    fullName: z.string(),
+    email: z.string(),
+    yearsExperience: z.number(),
+    targetRoles: z.array(z.string()),
+    topSkills: z.array(z.string()),
+    summary: z.string(),
+    preferredLocations: z.array(z.string()),
+    remotePreference: z.enum(["remote", "hybrid", "onsite", "no_preference"]),
+    seniority: z.enum(["junior", "mid", "senior"]),
+  }),
+  jobs: z.array(
+    z.object({
+      id: z.string(),
+      source: z.string(),
+      title: z.string(),
+      company: z.string(),
+      location: z.string(),
+      url: z.string().url(),
+      description: z.string(),
+      postedAt: z.string(),
+      salaryMin: z.number(),
+      salaryMax: z.number(),
+      salaryCurrency: z.string(),
+      salaryConfidence: z.enum(["listed", "estimated"]),
+      matchScore: z.number(),
+      matchReason: z.string(),
+    }),
+  ),
 });
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  const authorizedEmail = await getAuthorizedEmailFromRequest(request);
+  if (!authorizedEmail) {
+    return NextResponse.json({ error: "Purchase required to use the job matching tool." }, { status: 403 });
+  }
+
   try {
-    const accessToken = request.headers
-      .get("cookie")
-      ?.split(";")
-      .find((entry) => entry.trim().startsWith("rtj_access="))
-      ?.split("=")[1];
+    const payload = payloadSchema.parse(await request.json());
+    const jobs = payload.jobs.slice(0, 20);
+    const pitches = await generatePitchEmailsWithAI(payload.profile, jobs);
 
-    const hasAccess = accessToken
-      ? await isAccessTokenPaid(decodeURIComponent(accessToken))
-      : false;
-
-    if (!hasAccess) {
-      return NextResponse.json(
-        { error: "Payment required: unlock access on /dashboard." },
-        { status: 402 }
-      );
-    }
-
-    const { resultId } = bodySchema.parse(await request.json());
-
-    const record = await getSearchResult(resultId);
-    if (!record) {
-      return NextResponse.json({ error: "Result not found." }, { status: 404 });
-    }
-
-    const pitches = await generatePitches(record.parsedResume, record.jobs);
-    await updateSearchResultPitches(record.id, pitches);
-
-    return NextResponse.json({
-      resultId: record.id,
-      pitchCount: pitches.length
-    });
+    return NextResponse.json({ pitches });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Request failed";
-    return NextResponse.json({ error: message }, { status: 400 });
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: error.issues[0]?.message ?? "Invalid input." }, { status: 400 });
+    }
+
+    return NextResponse.json({ error: "Unable to generate pitches." }, { status: 500 });
   }
 }

@@ -1,70 +1,40 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { parseResume, rankJobs } from "@/lib/ai";
-import { createSearchResult, isAccessTokenPaid } from "@/lib/database";
-import { fetchJobLeads } from "@/lib/job-scrapers";
+import { getAuthorizedEmailFromRequest } from "@/lib/access";
+import { findRankedJobs } from "@/lib/job-scrapers";
+import { rerankJobsWithAI } from "@/lib/openai";
 
-export const runtime = "nodejs";
-
-const parsedResumeSchema = z.object({
-  summary: z.string(),
+const profileSchema = z.object({
+  fullName: z.string(),
+  email: z.string(),
   yearsExperience: z.number(),
-  desiredTitles: z.array(z.string()),
-  skills: z.array(z.string()),
-  locations: z.array(z.string()),
-  seniority: z.enum(["junior", "mid", "senior"])
+  targetRoles: z.array(z.string()),
+  topSkills: z.array(z.string()),
+  summary: z.string(),
+  preferredLocations: z.array(z.string()),
+  remotePreference: z.enum(["remote", "hybrid", "onsite", "no_preference"]),
+  seniority: z.enum(["junior", "mid", "senior"]),
 });
 
-const bodySchema = z.object({
-  resumeText: z.string().min(120),
-  parsedResume: parsedResumeSchema.optional()
-});
+export async function POST(request: NextRequest) {
+  const authorizedEmail = await getAuthorizedEmailFromRequest(request);
+  if (!authorizedEmail) {
+    return NextResponse.json({ error: "Purchase required to use the job matching tool." }, { status: 403 });
+  }
 
-export async function POST(request: Request) {
   try {
-    const accessToken = request.headers
-      .get("cookie")
-      ?.split(";")
-      .find((entry) => entry.trim().startsWith("rtj_access="))
-      ?.split("=")[1];
+    const payload = await request.json();
+    const profile = profileSchema.parse(payload.profile);
 
-    const hasAccess = accessToken
-      ? await isAccessTokenPaid(decodeURIComponent(accessToken))
-      : false;
+    const scrapedJobs = await findRankedJobs(profile, 25);
+    const rerankedJobs = await rerankJobsWithAI(profile, scrapedJobs);
 
-    if (!hasAccess) {
-      return NextResponse.json(
-        { error: "Payment required: unlock access on /dashboard." },
-        { status: 402 }
-      );
-    }
-
-    const body = bodySchema.parse(await request.json());
-
-    const parsedResume = body.parsedResume ?? (await parseResume(body.resumeText));
-
-    const allJobs = await fetchJobLeads(140);
-    const rankedJobs = rankJobs(parsedResume, allJobs);
-
-    if (rankedJobs.length < 5) {
-      return NextResponse.json(
-        { error: "Not enough live job data available. Please retry shortly." },
-        { status: 503 }
-      );
-    }
-
-    const record = await createSearchResult({
-      resumeText: body.resumeText,
-      parsedResume,
-      jobs: rankedJobs
-    });
-
-    return NextResponse.json({
-      resultId: record.id,
-      jobsCount: rankedJobs.length
-    });
+    return NextResponse.json({ jobs: rerankedJobs.slice(0, 20) });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Request failed";
-    return NextResponse.json({ error: message }, { status: 400 });
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: error.issues[0]?.message ?? "Invalid profile payload." }, { status: 400 });
+    }
+
+    return NextResponse.json({ error: "Unable to search jobs right now." }, { status: 500 });
   }
 }

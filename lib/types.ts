@@ -1,11 +1,19 @@
-export type ParsedResume = {
-  summary: string;
+export type RemotePreference = "remote" | "hybrid" | "onsite" | "no_preference";
+export type Seniority = "junior" | "mid" | "senior";
+
+export type ResumeProfile = {
+  fullName: string;
+  email: string;
   yearsExperience: number;
-  desiredTitles: string[];
-  skills: string[];
-  locations: string[];
-  seniority: "junior" | "mid" | "senior";
+  targetRoles: string[];
+  topSkills: string[];
+  summary: string;
+  preferredLocations: string[];
+  remotePreference: RemotePreference;
+  seniority: Seniority;
 };
+
+export type SalaryConfidence = "listed" | "estimated";
 
 export type JobLead = {
   id: string;
@@ -13,36 +21,19 @@ export type JobLead = {
   title: string;
   company: string;
   location: string;
-  remote: boolean;
   url: string;
   description: string;
-  salaryMin: number | null;
-  salaryMax: number | null;
+  postedAt: string;
+  salaryMin: number;
+  salaryMax: number;
   salaryCurrency: string;
-  postedAt: string | null;
-  fitScore: number;
-  fitReasons: string[];
+  salaryConfidence: SalaryConfidence;
+  matchScore: number;
+  matchReason: string;
 };
 
-export type PitchEmailModel = {
+export type PitchEmailDraft = {
   jobId: string;
   subject: string;
   body: string;
-};
-
-export type SearchResultRecord = {
-  id: string;
-  createdAt: string;
-  resumeText: string;
-  parsedResume: ParsedResume;
-  jobs: JobLead[];
-  pitches: PitchEmailModel[];
-};
-
-export type AccessTokenRecord = {
-  token: string;
-  email: string;
-  orderId: string;
-  status: "paid" | "pending";
-  createdAt: string;
 };

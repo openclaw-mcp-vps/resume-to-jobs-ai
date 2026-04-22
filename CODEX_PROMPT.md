@@ -11,25 +11,23 @@ NICHE: career-tools
 PRICE: $$19 one-time/mo
 
 ARCHITECTURE SPEC:
-Next.js app with AI-powered resume parsing and job matching. Users paste resumes, AI extracts skills/experience, scrapes job boards via APIs, ranks matches by fit score, and generates personalized pitch emails.
+Next.js app with resume upload, AI job matching via OpenAI, and job board scraping APIs. Users paste resume, AI analyzes skills/experience, searches aggregated job data, and returns ranked matches with generated pitch emails.
 
 PLANNED FILES:
 - app/page.tsx
-- app/api/parse-resume/route.ts
+- app/api/analyze-resume/route.ts
 - app/api/search-jobs/route.ts
 - app/api/generate-pitches/route.ts
 - app/api/webhooks/lemonsqueezy/route.ts
-- app/dashboard/page.tsx
-- app/results/[id]/page.tsx
-- lib/ai.ts
-- lib/job-scrapers.ts
-- lib/database.ts
-- lib/lemonsqueezy.ts
 - components/ResumeUpload.tsx
-- components/JobCard.tsx
+- components/JobResults.tsx
 - components/PitchEmail.tsx
+- lib/openai.ts
+- lib/job-scrapers.ts
+- lib/lemonsqueezy.ts
+- lib/database.ts
 
-DEPENDENCIES: next, tailwindcss, @ai-sdk/openai, ai, prisma, @prisma/client, postgres, @lemonsqueezy/lemonsqueezy.js, cheerio, pdf-parse, zod, react-hook-form
+DEPENDENCIES: next, tailwindcss, openai, prisma, @prisma/client, lemonsqueezy.js, cheerio, axios, zod, react-hook-form, lucide-react
 
 REQUIREMENTS:
 - Next.js 15 with App Router (app/ directory)
@@ -37,7 +35,7 @@ REQUIREMENTS:
 - Tailwind CSS v4
 - shadcn/ui components (npx shadcn@latest init, then add needed components)
 - Dark theme ONLY — background #0d1117, no light mode
-- Lemon Squeezy checkout overlay for payments
+- Stripe Payment Link for payments (hosted checkout — use the URL directly as the Buy button href)
 - Landing page that converts: hero, problem, solution, pricing, FAQ
 - The actual tool/feature behind a paywall (cookie-based access after purchase)
 - Mobile responsive
@@ -57,9 +55,13 @@ REQUIREMENTS:
   to package.json dependencies and re-run npm install + npm run build until it passes.
 
 ENVIRONMENT VARIABLES (create .env.example):
-- NEXT_PUBLIC_LEMON_SQUEEZY_STORE_ID
-- NEXT_PUBLIC_LEMON_SQUEEZY_PRODUCT_ID
-- LEMON_SQUEEZY_WEBHOOK_SECRET
+- NEXT_PUBLIC_STRIPE_PAYMENT_LINK  (full URL, e.g. https://buy.stripe.com/test_XXX)
+- NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY  (pk_test_... or pk_live_...)
+- STRIPE_WEBHOOK_SECRET  (set when webhook is wired)
+
+BUY BUTTON RULE: the Buy button's href MUST be `process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK`
+used as-is — do NOT construct URLs from a product ID, do NOT prepend any base URL,
+do NOT wrap it in an embed iframe. The link opens Stripe's hosted checkout directly.
 
 After creating all files:
 1. Run: npm install

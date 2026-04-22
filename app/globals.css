@@ -2,13 +2,12 @@
 
 :root {
   --background: #0d1117;
-  --background-elevated: #111827;
-  --foreground: #e6edf3;
-  --muted: #9ca3af;
-  --border: #273244;
-  --accent: #22d3ee;
-  --accent-2: #34d399;
-  --danger: #fb7185;
+  --foreground: #f0f6fc;
+  --muted: #161b22;
+  --card: #0f1722;
+  --border: #30363d;
+  --accent: #2f81f7;
+  --accent-foreground: #ffffff;
 }
 
 * {
@@ -17,22 +16,15 @@
 
 html,
 body {
-  background: radial-gradient(circle at top right, rgba(34, 211, 238, 0.1), transparent 35%),
-    radial-gradient(circle at 10% 20%, rgba(52, 211, 153, 0.1), transparent 30%),
-    var(--background);
+  background: radial-gradient(circle at 20% 20%, #182034 0%, #0d1117 45%), var(--background);
   color: var(--foreground);
   min-height: 100%;
 }
 
 body {
-  font-family: var(--font-geist-sans), "Segoe UI", sans-serif;
-  line-height: 1.5;
+  font-feature-settings: "rlig" 1, "calt" 1;
 }
 
 a {
   color: inherit;
-}
-
-::selection {
-  background: rgba(34, 211, 238, 0.35);
 }
